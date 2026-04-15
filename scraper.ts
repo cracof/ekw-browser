@@ -138,55 +138,60 @@ export async function scrapeEkw(prefix: string, number: string) {
     // Scrape basic information from the summary page
     console.log(`Scraping basic information...`);
     const summaryData = await page.evaluate(() => {
-      const data: Record<string, string> = {};
+      const results: Record<string, string> = {};
+      const debugLogs: string[] = [];
       
-      // Target the main content area to avoid footer/header noise
-      // EKW usually puts the main table in a specific div or just as the main table on page
       const tables = Array.from(document.querySelectorAll('table'));
+      debugLogs.push(`Found ${tables.length} tables on page`);
       
-      // Find the table that contains "Numer księgi wieczystej"
-      const mainTable = tables.find(t => t.innerText.includes("Numer księgi wieczystej"));
-      
-      if (mainTable) {
-        const rows = Array.from(mainTable.querySelectorAll('tr'));
-        rows.forEach(row => {
-          const cells = Array.from(row.querySelectorAll('td'));
-          if (cells.length >= 2) {
-            let label = cells[0].innerText.trim().replace(/:$/, "");
-            let value = cells[1].innerText.trim();
-            
-            // Basic validation to avoid noise
-            if (label && value && label.length < 100 && !label.includes("http")) {
-              data[label] = value;
+      tables.forEach((table, index) => {
+        const text = table.innerText;
+        debugLogs.push(`Table ${index} text snippet: ${text.substring(0, 100).replace(/\n/g, " ")}`);
+        
+        if (text.includes("Numer księgi wieczystej") || text.includes("Typ księgi")) {
+          debugLogs.push(`Table ${index} looks like the main data table.`);
+          const rows = Array.from(table.querySelectorAll('tr'));
+          rows.forEach((row, rIndex) => {
+            const cells = Array.from(row.querySelectorAll('td, th'));
+            if (cells.length >= 2) {
+              const label = cells[0].innerText.trim().replace(/:$/, "");
+              const value = cells[1].innerText.trim();
+              if (label && value && label.length < 100) {
+                results[label] = value;
+                debugLogs.push(`  Row ${rIndex}: Extracted [${label}] = [${value}]`);
+              }
             }
-          }
-        });
-      }
+          });
+        }
+      });
 
-      // If main table not found, try a more targeted row search
-      if (Object.keys(data).length === 0) {
-        const rows = Array.from(document.querySelectorAll('tr'));
-        rows.forEach(row => {
-          const cells = Array.from(row.querySelectorAll('td'));
-          if (cells.length === 2) {
+      // If results are still empty, try a broader search
+      if (Object.keys(results).length === 0) {
+        debugLogs.push("Main table detection failed. Trying broader row search...");
+        const allRows = Array.from(document.querySelectorAll('tr'));
+        allRows.forEach((row, index) => {
+          const cells = Array.from(row.querySelectorAll('td, th'));
+          if (cells.length >= 2) {
             const label = cells[0].innerText.trim().replace(/:$/, "");
             const value = cells[1].innerText.trim();
-            // Only take labels we expect in a KW summary
-            const expectedLabels = ["Numer", "Typ", "Oznaczenie", "Data", "Położenie", "Właściciel"];
-            if (expectedLabels.some(l => label.includes(l))) {
-              data[label] = value;
+            if (label && value && label.length < 100 && !label.includes("http")) {
+              results[label] = value;
             }
           }
         });
       }
 
-      return data;
+      return { results, debugLogs };
     });
+
+    console.log("SCRAPER DEBUG LOGS FROM PAGE:");
+    summaryData.debugLogs.forEach(log => console.log(`  > ${log}`));
+    console.log("EXTRACTED DATA:", JSON.stringify(summaryData.results, null, 2));
 
     return {
       fullNumber,
       rawHtml: await page.content(),
-      parsedData: { "Informacje Podstawowe": summaryData }
+      parsedData: { "Informacje Podstawowe": summaryData.results }
     };
 
   } catch (error) {
