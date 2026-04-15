@@ -93,11 +93,31 @@ export async function scrapeEkw(prefix: string, number: string) {
     // Click search button
     console.log(`Clicking search button...`);
     try {
-      await page.waitForSelector("#wyszukaj", { timeout: 5000 });
-      await page.click("#wyszukaj");
-      await page.waitForNavigation({ waitUntil: "networkidle2" });
-    } catch (e) {
-      throw new Error("Nie udało się kliknąć przycisku wyszukiwania.");
+      await page.waitForSelector("#wyszukaj", { timeout: 10000 });
+      
+      // Small delay to ensure any overlays are gone
+      await new Promise(r => setTimeout(r, 500));
+      
+      const clicked = await page.evaluate(() => {
+        const btn = document.querySelector("#wyszukaj") as HTMLButtonElement;
+        if (btn) {
+          btn.click();
+          return true;
+        }
+        return false;
+      });
+
+      if (!clicked) {
+        await page.click("#wyszukaj");
+      }
+      
+      await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 });
+    } catch (e: any) {
+      const title = await page.title();
+      const url = page.url();
+      console.log(`DEBUG: Search click failed. URL: ${url}, Title: ${title}, Error: ${e.message}`);
+      await page.screenshot({ path: `debug_click_fail_${Date.now()}.png` });
+      throw new Error(`Nie udało się kliknąć przycisku wyszukiwania. Sprawdź czy strona się załadowała.`);
     }
 
     // Check for CAPTCHA
