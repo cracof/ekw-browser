@@ -1,0 +1,6 @@
+{
+  "name": "EKW Scraper & Browser",
+  "description": "A tool to search, scrape, and parse Polish Land and Mortgage Registers (EKW).",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
