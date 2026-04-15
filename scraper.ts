@@ -137,56 +137,109 @@ export async function scrapeEkw(prefix: string, number: string) {
 
     // Scrape basic information from the summary page
     console.log(`Scraping basic information...`);
+    
+    // Wait for a known element on the results page or a timeout
+    try {
+      await page.waitForFunction(
+        () => document.body.innerText.includes("Numer księgi wieczystej") || 
+              document.body.innerText.includes("nie została znaleziona"),
+        { timeout: 10000 }
+      );
+    } catch (e) {
+      console.log("Timeout waiting for results text, proceeding with current state...");
+    }
+
     const summaryData = await page.evaluate(() => {
       const results: Record<string, string> = {};
       const debugLogs: string[] = [];
       
-      const tables = Array.from(document.querySelectorAll('table'));
-      debugLogs.push(`Found ${tables.length} tables on page`);
-      
-      tables.forEach((table, index) => {
-        const text = table.innerText;
-        debugLogs.push(`Table ${index} text snippet: ${text.substring(0, 100).replace(/\n/g, " ")}`);
+      const scrapeFromDocument = (doc: Document, prefix = "") => {
+        const tables = Array.from(doc.querySelectorAll('table'));
+        debugLogs.push(`${prefix}Found ${tables.length} tables`);
         
-        if (text.includes("Numer księgi wieczystej") || text.includes("Typ księgi")) {
-          debugLogs.push(`Table ${index} looks like the main data table.`);
-          const rows = Array.from(table.querySelectorAll('tr'));
-          rows.forEach((row, rIndex) => {
-            const cells = Array.from(row.querySelectorAll('td, th'));
+        tables.forEach((table, index) => {
+          const text = table.innerText;
+          if (text.includes("Numer księgi wieczystej") || text.includes("Typ księgi")) {
+            debugLogs.push(`${prefix}Table ${index} is a data table.`);
+            const rows = Array.from(table.querySelectorAll('tr'));
+            rows.forEach((row) => {
+              const cells = Array.from(row.querySelectorAll('td, th'));
+              if (cells.length >= 2) {
+                const label = cells[0].innerText.trim().replace(/:$/, "");
+                const value = cells[1].innerText.trim();
+                if (label && value && label.length < 100 && !label.includes("http")) {
+                  results[label] = value;
+                }
+              }
+            });
+          }
+        });
+
+        if (Object.keys(results).length === 0) {
+          debugLogs.push(`${prefix}Trying broader search...`);
+          const rows = Array.from(doc.querySelectorAll('tr, .row, .form-row'));
+          rows.forEach(row => {
+            const cells = Array.from(row.querySelectorAll('td, th, .label, .value'));
             if (cells.length >= 2) {
               const label = cells[0].innerText.trim().replace(/:$/, "");
               const value = cells[1].innerText.trim();
-              if (label && value && label.length < 100) {
+              if (label && value && label.length < 100 && !label.includes("http")) {
                 results[label] = value;
-                debugLogs.push(`  Row ${rIndex}: Extracted [${label}] = [${value}]`);
               }
             }
           });
         }
-      });
+      };
 
-      // If results are still empty, try a broader search
-      if (Object.keys(results).length === 0) {
-        debugLogs.push("Main table detection failed. Trying broader row search...");
-        const allRows = Array.from(document.querySelectorAll('tr'));
-        allRows.forEach((row, index) => {
-          const cells = Array.from(row.querySelectorAll('td, th'));
-          if (cells.length >= 2) {
-            const label = cells[0].innerText.trim().replace(/:$/, "");
-            const value = cells[1].innerText.trim();
-            if (label && value && label.length < 100 && !label.includes("http")) {
-              results[label] = value;
-            }
-          }
-        });
-      }
-
+      debugLogs.push(`Current URL: ${window.location.href}`);
+      debugLogs.push(`Current Title: ${document.title}`);
+      
+      // Scrape main document
+      scrapeFromDocument(document, "Main: ");
+      
       return { results, debugLogs };
     });
 
-    console.log("SCRAPER DEBUG LOGS FROM PAGE:");
+    console.log("SCRAPER DEBUG LOGS:");
     summaryData.debugLogs.forEach(log => console.log(`  > ${log}`));
-    console.log("EXTRACTED DATA:", JSON.stringify(summaryData.results, null, 2));
+    
+    // If main document failed, try frames
+    if (Object.keys(summaryData.results).length === 0) {
+      console.log("Main page empty, checking frames...");
+      const frames = page.frames();
+      for (const frame of frames) {
+        if (frame === page.mainFrame()) continue;
+        console.log(`Checking frame: ${frame.url()}`);
+        try {
+          const frameData = await frame.evaluate(() => {
+            const res: Record<string, string> = {};
+            const tables = Array.from(document.querySelectorAll('table'));
+            tables.forEach(table => {
+              if (table.innerText.includes("Numer księgi wieczystej")) {
+                Array.from(table.querySelectorAll('tr')).forEach(row => {
+                  const cells = Array.from(row.querySelectorAll('td, th'));
+                  if (cells.length >= 2) {
+                    const label = cells[0].innerText.trim().replace(/:$/, "");
+                    const value = cells[1].innerText.trim();
+                    if (label && value && label.length < 100) res[label] = value;
+                  }
+                });
+              }
+            });
+            return res;
+          });
+          if (Object.keys(frameData).length > 0) {
+            console.log("Data found in frame!");
+            summaryData.results = frameData;
+            break;
+          }
+        } catch (e) {
+          console.log(`Could not access frame ${frame.url()}`);
+        }
+      }
+    }
+
+    console.log("FINAL EXTRACTED DATA:", JSON.stringify(summaryData.results, null, 2));
 
     return {
       fullNumber,
