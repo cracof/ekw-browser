@@ -49,10 +49,11 @@ export async function scrapeEkw(prefix: string, number: string) {
     try {
       await Promise.all([
         page.waitForSelector("#kodWydzialuInput", { timeout: 15000 }),
-        page.waitForSelector("#numerKsiegiWieczystejInput", { timeout: 15000 }),
-        page.waitForSelector("#cyfraKontrolnaInput", { timeout: 15000 })
+        page.waitForSelector("#numerKsiegiWieczystej", { timeout: 15000 }),
+        page.waitForSelector("#cyfraKontrolna", { timeout: 15000 })
       ]);
     } catch (e) {
+      // ... (keep existing debug logic)
       const content = await page.content();
       const title = await page.title();
       const url = page.url();
@@ -60,11 +61,7 @@ export async function scrapeEkw(prefix: string, number: string) {
       // Inspect frames
       const frames = page.frames();
       console.log(`DEBUG: Total frames: ${frames.length}`);
-      for (let i = 0; i < frames.length; i++) {
-        console.log(`DEBUG: Frame ${i} URL: ${frames[i].url()}`);
-      }
-
-      // List all inputs on the main page
+      
       const inputs = await page.evaluate(() => {
         return Array.from(document.querySelectorAll('input, select, button')).map(el => ({
           tag: el.tagName,
@@ -74,17 +71,12 @@ export async function scrapeEkw(prefix: string, number: string) {
           type: (el as any).type
         }));
       });
-      console.log(`DEBUG: Found ${inputs.length} inputs on main page:`, JSON.stringify(inputs));
-
-      // Save screenshot for debugging
-      const screenshotPath = `debug_fail_${Date.now()}.png`;
-      await page.screenshot({ path: screenshotPath, fullPage: true });
-      console.log(`DEBUG: Screenshot saved to ${screenshotPath}`);
+      console.log(`DEBUG: Found ${inputs.length} inputs:`, JSON.stringify(inputs));
 
       if (content.includes("Przerwa techniczna")) throw new Error("Serwis EKW ma przerwę techniczną.");
       if (content.includes("verify you are human") || content.includes("cloudflare")) throw new Error("Wykryto blokadę Cloudflare/CAPTCHA.");
       
-      throw new Error(`Nie znaleziono pól formularza. Znaleziono ${inputs.length} elementów wejściowych. Sprawdź logi konsoli.`);
+      throw new Error(`Nie znaleziono pól formularza. Sprawdź logi.`);
     }
 
     // Fill the form with human-like delays
@@ -92,24 +84,29 @@ export async function scrapeEkw(prefix: string, number: string) {
     await page.focus("#kodWydzialuInput");
     await page.keyboard.type(prefix.toUpperCase(), { delay: 150 });
     
-    await page.focus("#numerKsiegiWieczystejInput");
+    await page.focus("#numerKsiegiWieczystej");
     await page.keyboard.type(number, { delay: 150 });
     
-    await page.focus("#cyfraKontrolnaInput");
+    await page.focus("#cyfraKontrolna");
     await page.keyboard.type(checkDigit.toString(), { delay: 150 });
+
+    // Click search button
+    console.log(`Clicking search button...`);
+    try {
+      await page.waitForSelector("#wyszukaj", { timeout: 5000 });
+      await page.click("#wyszukaj");
+      await page.waitForNavigation({ waitUntil: "networkidle2" });
+    } catch (e) {
+      throw new Error("Nie udało się kliknąć przycisku wyszukiwania.");
+    }
 
     // Check for CAPTCHA
     const captchaExists = await page.$("#captcha");
     if (captchaExists) {
       console.log("CAPTCHA detected. Manual intervention or solver needed.");
-      // In a real scenario, we'd use a solver service or wait for manual input
-      // For this demo, we'll take a screenshot and throw an error
       await page.screenshot({ path: `captcha_${Date.now()}.png` });
-      throw new Error("CAPTCHA detected. Automated solving not implemented in this demo.");
+      throw new Error("Wykryto CAPTCHA. Automatyczne rozwiązywanie nie jest zaimplementowane.");
     }
-
-    await page.click("#wyszukaj");
-    await page.waitForNavigation({ waitUntil: "networkidle2" });
 
     // Check if register found
     const errorMsg = await page.$(".error-message");
@@ -118,39 +115,72 @@ export async function scrapeEkw(prefix: string, number: string) {
       throw new Error(`EKW Error: ${text}`);
     }
 
-    // Navigate to "Przeglądanie aktualnej treści KW"
-    try {
-      await page.waitForSelector("input[value='Przeglądanie aktualnej treści KW']", { timeout: 10000 });
-      await page.click("input[value='Przeglądanie aktualnej treści KW']");
-      await page.waitForNavigation({ waitUntil: "networkidle2" });
-    } catch (e) {
-      throw new Error("Nie znaleziono przycisku 'Przeglądanie aktualnej treści KW'. Możliwe, że księga nie istnieje lub wystąpił błąd sesji.");
-    }
+    // Scrape basic information from the summary page
+    console.log(`Scraping basic information...`);
+    const summaryData = await page.evaluate(() => {
+      const data: Record<string, string> = {};
+      
+      // Look for all table rows
+      const rows = Array.from(document.querySelectorAll('table tr, div.row'));
+      
+      rows.forEach(row => {
+        // Try different ways to find label and value
+        let label = "";
+        let value = "";
 
-    // Now we are in the register view. We need to scrape all sections (Dział I-O, I-Sp, II, III, IV)
-    const sections = ["Dział I-O", "Dział I-Sp", "Dział II", "Dział III", "Dział IV"];
-    const results: any = {};
-
-    for (const section of sections) {
-      // Find button for section and click
-      const buttons = await page.$$("input[type='submit']");
-      for (const btn of buttons) {
-        const val = await page.evaluate(el => (el as HTMLInputElement).value, btn);
-        if (val.includes(section)) {
-          await btn.click();
-          await page.waitForNavigation({ waitUntil: "networkidle2" });
-          
-          const html = await page.content();
-          results[section] = parseSection(html);
-          break;
+        // Standard table cells
+        const cells = Array.from(row.querySelectorAll('td'));
+        if (cells.length >= 2) {
+          label = cells[0].textContent?.trim() || "";
+          value = cells[1].textContent?.trim() || "";
+        } else {
+          // Div based layout or other
+          const labelEl = row.querySelector('.label, .left, b, strong');
+          const valueEl = row.querySelector('.value, .right, span:not(.label)');
+          if (labelEl && valueEl) {
+            label = labelEl.textContent?.trim() || "";
+            value = valueEl.textContent?.trim() || "";
+          }
         }
+
+        // Clean up label
+        label = label.replace(/:$/, "").trim();
+        
+        if (label && value && label.length < 100) {
+          if (data[label]) {
+            // Avoid duplicates if same text
+            if (!data[label].includes(value)) {
+              data[label] += `\n${value}`;
+            }
+          } else {
+            data[label] = value;
+          }
+        }
+      });
+
+      // Fallback: if data is still empty, try to get anything that looks like a key-value pair
+      if (Object.keys(data).length === 0) {
+        const allText = document.body.innerText;
+        const lines = allText.split('\n');
+        lines.forEach(line => {
+          if (line.includes(':')) {
+            const [k, ...v] = line.split(':');
+            const key = k.trim();
+            const val = v.join(':').trim();
+            if (key && val && key.length < 50) {
+              data[key] = val;
+            }
+          }
+        });
       }
-    }
+
+      return data;
+    });
 
     return {
       fullNumber,
       rawHtml: await page.content(),
-      parsedData: results
+      parsedData: { "Informacje Podstawowe": summaryData }
     };
 
   } catch (error) {
