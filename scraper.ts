@@ -140,55 +140,41 @@ export async function scrapeEkw(prefix: string, number: string) {
     const summaryData = await page.evaluate(() => {
       const data: Record<string, string> = {};
       
-      // Look for all table rows
-      const rows = Array.from(document.querySelectorAll('table tr, div.row'));
+      // Target the main content area to avoid footer/header noise
+      // EKW usually puts the main table in a specific div or just as the main table on page
+      const tables = Array.from(document.querySelectorAll('table'));
       
-      rows.forEach(row => {
-        // Try different ways to find label and value
-        let label = "";
-        let value = "";
-
-        // Standard table cells
-        const cells = Array.from(row.querySelectorAll('td'));
-        if (cells.length >= 2) {
-          label = cells[0].textContent?.trim() || "";
-          value = cells[1].textContent?.trim() || "";
-        } else {
-          // Div based layout or other
-          const labelEl = row.querySelector('.label, .left, b, strong');
-          const valueEl = row.querySelector('.value, .right, span:not(.label)');
-          if (labelEl && valueEl) {
-            label = labelEl.textContent?.trim() || "";
-            value = valueEl.textContent?.trim() || "";
-          }
-        }
-
-        // Clean up label
-        label = label.replace(/:$/, "").trim();
-        
-        if (label && value && label.length < 100) {
-          if (data[label]) {
-            // Avoid duplicates if same text
-            if (!data[label].includes(value)) {
-              data[label] += `\n${value}`;
+      // Find the table that contains "Numer księgi wieczystej"
+      const mainTable = tables.find(t => t.innerText.includes("Numer księgi wieczystej"));
+      
+      if (mainTable) {
+        const rows = Array.from(mainTable.querySelectorAll('tr'));
+        rows.forEach(row => {
+          const cells = Array.from(row.querySelectorAll('td'));
+          if (cells.length >= 2) {
+            let label = cells[0].innerText.trim().replace(/:$/, "");
+            let value = cells[1].innerText.trim();
+            
+            // Basic validation to avoid noise
+            if (label && value && label.length < 100 && !label.includes("http")) {
+              data[label] = value;
             }
-          } else {
-            data[label] = value;
           }
-        }
-      });
+        });
+      }
 
-      // Fallback: if data is still empty, try to get anything that looks like a key-value pair
+      // If main table not found, try a more targeted row search
       if (Object.keys(data).length === 0) {
-        const allText = document.body.innerText;
-        const lines = allText.split('\n');
-        lines.forEach(line => {
-          if (line.includes(':')) {
-            const [k, ...v] = line.split(':');
-            const key = k.trim();
-            const val = v.join(':').trim();
-            if (key && val && key.length < 50) {
-              data[key] = val;
+        const rows = Array.from(document.querySelectorAll('tr'));
+        rows.forEach(row => {
+          const cells = Array.from(row.querySelectorAll('td'));
+          if (cells.length === 2) {
+            const label = cells[0].innerText.trim().replace(/:$/, "");
+            const value = cells[1].innerText.trim();
+            // Only take labels we expect in a KW summary
+            const expectedLabels = ["Numer", "Typ", "Oznaczenie", "Data", "Położenie", "Właściciel"];
+            if (expectedLabels.some(l => label.includes(l))) {
+              data[label] = value;
             }
           }
         });
