@@ -153,49 +153,51 @@ export async function scrapeEkw(prefix: string, number: string) {
       const results: Record<string, string> = {};
       const debugLogs: string[] = [];
       
-      const scrapeFromDocument = (doc: Document, prefix = "") => {
-        const tables = Array.from(doc.querySelectorAll('table'));
-        debugLogs.push(`${prefix}Found ${tables.length} tables`);
-        
-        tables.forEach((table, index) => {
-          const text = table.innerText;
-          if (text.includes("Numer księgi wieczystej") || text.includes("Typ księgi")) {
-            debugLogs.push(`${prefix}Table ${index} is a data table.`);
-            const rows = Array.from(table.querySelectorAll('tr'));
-            rows.forEach((row) => {
-              const cells = Array.from(row.querySelectorAll('td, th'));
-              if (cells.length >= 2) {
-                const label = cells[0].innerText.trim().replace(/:$/, "");
-                const value = cells[1].innerText.trim();
-                if (label && value && label.length < 100 && !label.includes("http")) {
-                  results[label] = value;
-                }
-              }
-            });
-          }
-        });
-
-        if (Object.keys(results).length === 0) {
-          debugLogs.push(`${prefix}Trying broader search...`);
-          const rows = Array.from(doc.querySelectorAll('tr, .row, .form-row'));
-          rows.forEach(row => {
-            const cells = Array.from(row.querySelectorAll('td, th, .label, .value'));
+      const doc = document;
+      const prefix = "Main: ";
+      
+      const tables = Array.from(doc.querySelectorAll('table'));
+      debugLogs.push(`${prefix}Found ${tables.length} tables`);
+      
+      tables.forEach((table, index) => {
+        const text = (table as HTMLElement).innerText || table.textContent || "";
+        if (text.includes("Numer księgi wieczystej") || text.includes("Typ księgi")) {
+          debugLogs.push(`${prefix}Table ${index} is a data table.`);
+          const rows = Array.from(table.querySelectorAll('tr'));
+          rows.forEach((row) => {
+            const cells = Array.from(row.querySelectorAll('td, th'));
             if (cells.length >= 2) {
-              const label = cells[0].innerText.trim().replace(/:$/, "");
-              const value = cells[1].innerText.trim();
+              const label = ((cells[0] as HTMLElement).innerText || cells[0].textContent || "").trim().replace(/:$/, "");
+              const value = ((cells[1] as HTMLElement).innerText || cells[1].textContent || "").trim();
               if (label && value && label.length < 100 && !label.includes("http")) {
                 results[label] = value;
               }
             }
           });
         }
-      };
+      });
+
+      if (Object.keys(results).length === 0) {
+        debugLogs.push(`${prefix}Trying broader search...`);
+        // Try to find any element that looks like a label-value pair
+        const allElements = Array.from(doc.querySelectorAll('tr, div, p, span'));
+        allElements.forEach(el => {
+          const text = (el as HTMLElement).innerText || el.textContent || "";
+          if (text.includes(':') && text.length < 200) {
+            const parts = text.split(':');
+            if (parts.length >= 2) {
+              const label = parts[0].trim();
+              const value = parts.slice(1).join(':').trim();
+              if (label && value && label.length < 50 && value.length < 500 && !label.includes("http")) {
+                if (!results[label]) results[label] = value;
+              }
+            }
+          }
+        });
+      }
 
       debugLogs.push(`Current URL: ${window.location.href}`);
       debugLogs.push(`Current Title: ${document.title}`);
-      
-      // Scrape main document
-      scrapeFromDocument(document, "Main: ");
       
       return { results, debugLogs };
     });
@@ -203,8 +205,10 @@ export async function scrapeEkw(prefix: string, number: string) {
     console.log("SCRAPER DEBUG LOGS:");
     summaryData.debugLogs.forEach(log => console.log(`  > ${log}`));
     
+    let finalResults = summaryData.results;
+
     // If main document failed, try frames
-    if (Object.keys(summaryData.results).length === 0) {
+    if (Object.keys(finalResults).length === 0) {
       console.log("Main page empty, checking frames...");
       const frames = page.frames();
       for (const frame of frames) {
@@ -215,12 +219,13 @@ export async function scrapeEkw(prefix: string, number: string) {
             const res: Record<string, string> = {};
             const tables = Array.from(document.querySelectorAll('table'));
             tables.forEach(table => {
-              if (table.innerText.includes("Numer księgi wieczystej")) {
+              const text = (table as HTMLElement).innerText || table.textContent || "";
+              if (text.includes("Numer księgi wieczystej")) {
                 Array.from(table.querySelectorAll('tr')).forEach(row => {
                   const cells = Array.from(row.querySelectorAll('td, th'));
                   if (cells.length >= 2) {
-                    const label = cells[0].innerText.trim().replace(/:$/, "");
-                    const value = cells[1].innerText.trim();
+                    const label = ((cells[0] as HTMLElement).innerText || cells[0].textContent || "").trim().replace(/:$/, "");
+                    const value = ((cells[1] as HTMLElement).innerText || cells[1].textContent || "").trim();
                     if (label && value && label.length < 100) res[label] = value;
                   }
                 });
@@ -230,7 +235,7 @@ export async function scrapeEkw(prefix: string, number: string) {
           });
           if (Object.keys(frameData).length > 0) {
             console.log("Data found in frame!");
-            summaryData.results = frameData;
+            finalResults = frameData;
             break;
           }
         } catch (e) {
@@ -239,12 +244,35 @@ export async function scrapeEkw(prefix: string, number: string) {
       }
     }
 
-    console.log("FINAL EXTRACTED DATA:", JSON.stringify(summaryData.results, null, 2));
+    // Fallback: Server-side parsing with Cheerio if browser-side failed
+    if (Object.keys(finalResults).length === 0) {
+      console.log("Browser-side scraping failed, trying server-side Cheerio parsing...");
+      const html = await page.content();
+      const $ = cheerio.load(html);
+      
+      $("table").each((_, table) => {
+        const tableText = $(table).text();
+        if (tableText.includes("Numer księgi wieczystej") || tableText.includes("Typ księgi")) {
+          $(table).find("tr").each((_, row) => {
+            const cells = $(row).find("td, th");
+            if (cells.length >= 2) {
+              const label = $(cells[0]).text().trim().replace(/:$/, "");
+              const value = $(cells[1]).text().trim();
+              if (label && value && label.length < 100 && !label.includes("http")) {
+                finalResults[label] = value;
+              }
+            }
+          });
+        }
+      });
+    }
+
+    console.log("FINAL EXTRACTED DATA:", JSON.stringify(finalResults, null, 2));
 
     return {
       fullNumber,
       rawHtml: await page.content(),
-      parsedData: { "Informacje Podstawowe": summaryData.results }
+      parsedData: Object.keys(finalResults).length > 0 ? { "Informacje Podstawowe": finalResults } : null
     };
 
   } catch (error) {
